@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_err() {
+  _echoerr "err: $@"
+  exit 1
+}
+
+_echoerr() {
+  1>&2 echo "$@"
+}
+
+_forever() {
+  while true; do
+    _echoerr "_forever: $@"
+    $@ && break
+    sleep 1
+  done
+}
+
+_never() {
+  while true; do
+    _echoerr "_never: $@"
+    $@ || break
+    sleep 1
+  done
+}
+
+export AWS_PAGER=""
+
+handled=yes
+case $1 in
+  get-regions)
+    2>/dev/null aws rds describe-source-regions --region eu-west-1 --output=text --query='SourceRegions[*].RegionName'
+  ;;
+  list-all)
+    for region in $($0 get-regions); do
+      _echoerr "${region}:"
+      $0 list $region
+    done
+  ;;
+  *)
+    handled=no
+  ;;
+esac
+[ "$handled" = "yes" ] && exit 0
+
+region=$2
+handled=yes
+case $1 in
+  list)
+    2>/dev/null aws rds describe-db-clusters \
+      --region $region \
+      --filters "Name=tag:Name,Values=rdsler-*" \
+      --query "DBClusters[*].DBClusterIdentifier" \
+      --output "text" || true
+  ;;
+  *)
+    handled=no
+  ;;
+esac
+[ "$handled" = "yes" ] && exit 0
+
+identifier="${3}"
+opts=${@:4}
+case $1 in
+  describe)
+    selector="${4:-}"
+
+    2>/dev/null aws rds describe-db-clusters \
+      --region $region \
+      --db-cluster-identifier rdsler-$identifier \
+      --query "DBClusters[0]${selector}" \
+      --output text
+  ;;
+  status)
+    status=$(
+      aws rds describe-db-clusters \
+        --region $region \
+        --db-cluster-identifier rdsler-$identifier \
+        --query "DBClusters[0].Status" \
+        --output text
+    )
+    if [ "$status" = "" ]; then
+      exit 1
+    else
+      echo "$status"
+    fi
+  ;;
+  wait-for-status)
+    desired=$4
+    while true; do
+      status=$($0 status $region $identifier)
+      [ "$status" = "$desired" ] && break
+
+      _echoerr "current status: '$status', waiting for '$desired'"
+      sleep 1
+    done
+
+    _echoerr "reached status: '$desired'"
+  ;;
+  get-endpoint)
+    $0 describe $region $identifier .Endpoint
+  ;;
+  get-port)
+    $0 describe $region $identifier .Port
+  ;;
+  get-security-group)
+    securityGroups=$(
+      aws ec2 describe-security-groups \
+        --region $region \
+        --filters "Name=tag:Name,Values=rdsler-$identifier" \
+        --query "SecurityGroups[0].GroupId" \
+        --output text
+    )
+
+    if [ "$securityGroups" = "None" ]; then
+      exit 1
+    else
+      echo "$securityGroups"
+    fi
+  ;;
+  ensure-security-group)
+    if ! >/dev/null $0 get-security-group $region $identifier; then
+      >/dev/null aws ec2 create-security-group \
+        --region $region \
+        --description rdsler-$identifier \
+        --group-name rdsler-$identifier \
+        --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=rdsler-$identifier}]"
+    fi
+
+    securityGroupId=$($0 get-security-group $region $identifier)
+
+
+    >/dev/null 2>&1 aws ec2 authorize-security-group-ingress \
+      --region $region \
+      --group-id $securityGroupId \
+      --query "SecurityGroupRules[0].SecurityGroupRuleId" \
+      --output "text" \
+      --ip-permissions """[
+  {
+    \"IpProtocol\": \"tcp\",
+    \"FromPort\": 5432,
+    \"ToPort\": 5432,
+    \"IpRanges\": [
+      {
+        \"CidrIp\": \"0.0.0.0/0\",
+        \"Description\": \"rdsler was here\"
+      }
+    ]
+  }
+]""" || _echoerr "already authorized 0.0.0.0/0"
+
+    echo $securityGroupId
+  ;;
+  delete-security-group)
+    >/dev/null $0 get-security-group $region $identifier || exit 1
+
+    aws ec2 delete-security-group --region $region --group-name rdsler-$identifier
+  ;;
+  ensure)
+    securityGroupId=$($0 ensure-security-group $region $identifier)
+
+    # engine version
+    if ! $0 status $region $identifier; then
+      aws rds create-db-cluster \
+        --region $region \
+        --db-cluster-identifier rdsler-$identifier \
+        --engine aurora-postgresql \
+        --engine-mode serverless \
+        --master-username $RDSLER_USER --master-user-password $RDSLER_PASSWORD \
+        --vpc-security-group-ids $securityGroupId \
+        --scaling-configuration MinCapacity=2,MaxCapacity=2,AutoPause=true,SecondsUntilAutoPause=300,TimeoutAction=ForceApplyCapacityChange,SecondsBeforeTimeout=300
+    fi
+
+    $0 wait-for-status $region $identifier available
+  ;;
+  modify)
+    capacity=""
+    backupRetentionPeriod=""
+    for opt in $opts; do
+      case $opt in
+        --capacity=*)
+          capacity=${opt#*=}
+        ;;
+        --backup-retention-period=*)
+          backupRetentionPeriod=${opt#*=}
+        ;;
+      esac
+    done
+
+    scalingConfiguration=""
+    if [ "$capacity" != "" ]; then
+      minCapacity=${capacity%:*}
+      maxCapacity=${capacity#*:}
+      scalingConfiguration="--scaling-configuration MinCapacity=${minCapacity},MaxCapacity=${maxCapacity},AutoPause=true,SecondsUntilAutoPause=300,TimeoutAction=ForceApplyCapacityChange,SecondsBeforeTimeout=300"
+    fi
+
+    backupConfiguration=""
+    if [ "$backupRetentionPeriod" != "" ]; then
+      backupConfiguration="--backup-retention-period ${backupRetentionPeriod}"
+    fi
+
+    aws rds modify-db-cluster \
+      --region $region \
+      --db-cluster-identifier rdsler-$identifier \
+      $scalingConfiguration \
+      $backupConfiguration \
+      --apply-immediately
+
+# [--backup-retention-period <value>]
+# [--db-cluster-parameter-group-name <value>]
+# [--vpc-security-group-ids <value>]
+# [--port <value>]
+# [--master-user-password <value>]
+# [--option-group-name <value>]
+# [--preferred-backup-window <value>]
+# [--preferred-maintenance-window <value>]
+# [--enable-iam-database-authentication | --no-enable-iam-database-authentication]
+# [--backtrack-window <value>]
+# [--cloudwatch-logs-export-configuration <value>]
+# [--engine-version <value>]
+# [--allow-major-version-upgrade | --no-allow-major-version-upgrade]
+# [--db-instance-parameter-group-name <value>]
+# [--domain <value>]
+# [--domain-iam-role-name <value>]
+# [--scaling-configuration <value>]
+# [--deletion-protection | --no-deletion-protection]
+# [--enable-http-endpoint | --no-enable-http-endpoint]
+# [--copy-tags-to-snapshot | --no-copy-tags-to-snapshot]
+# [--enable-global-write-forwarding | --no-enable-global-write-forwarding]
+# [--db-cluster-instance-class <value>]
+# [--allocated-storage <value>]
+# [--storage-type <value>]
+# [--iops <value>]
+# [--auto-minor-version-upgrade | --no-auto-minor-version-upgrade]
+# [--monitoring-interval <value>]
+# [--monitoring-role-arn <value>]
+# [--enable-performance-insights | --no-enable-performance-insights]
+# [--performance-insights-kms-key-id <value>]
+# [--performance-insights-retention-period <value>]
+# [--cli-input-json | --cli-input-yaml]
+# [--generate-cli-skeleton <value>]
+  ;;
+  delete)
+    if >/dev/null $0 status $region $identifier; then
+      aws rds delete-db-cluster \
+        --region $region \
+        --skip-final-snapshot \
+        --db-cluster-identifier rdsler-$identifier
+    fi
+
+    _never $0 status $region $identifier
+
+    if $0 get-security-group $region $identifier; then
+      _forever $0 delete-security-group $region $identifier
+    fi
+
+    echo ""
+    echo "DONE"
+  ;;
+esac
