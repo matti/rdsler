@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_echoerr() {
+  2>&1 echo "$@"
+}
+
+_err() {
+  _echoerr $@
+  exit 1
+}
+
+case $1 in
+  recreate)
+    touch .bash_history
+    while true; do
+      docker-compose up -d --build --force-recreate --timeout 0
+      docker-compose exec rdsler bash
+      sleep 1
+    done
+  ;;
+  shell)
+    while true; do
+      docker-compose exec rdsler bash
+      sleep 1
+    done
+  ;;
+  *)
+    _err "?"
+  ;;
+esac

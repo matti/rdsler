@@ -1,0 +1,15 @@
+version: '3'
+
+services:
+  rdsler:
+    build: .
+    image: mattipaksula/rdsler
+    entrypoint: /usr/bin/tail
+    command:
+      - -f
+      - /dev/null
+    env_file:
+      - .env
+    volumes:
+      - .bash_history:/root/.bash_history
+      - .:/app
