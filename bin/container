@@ -6,7 +6,7 @@ _echoerr() {
 }
 
 _err() {
-  _echoerr $@
+  _echoerr "$@"
   exit 1
 }
 
@@ -15,7 +15,7 @@ case $1 in
     touch .bash_history
     while true; do
       docker-compose up -d --build --force-recreate --timeout 0
-      docker-compose exec rdsler bash
+      docker-compose exec rdsler bash || true
       sleep 1
     done
   ;;

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 _err() {
-  _echoerr "err: $@"
+  _echoerr "err: $*"
   exit 1
 }
 
@@ -12,16 +12,16 @@ _echoerr() {
 
 _forever() {
   while true; do
-    _echoerr "_forever: $@"
-    $@ && break
+    _echoerr "_forever: $*"
+    "$*" && break
     sleep 1
   done
 }
 
 _never() {
   while true; do
-    _echoerr "_never: $@"
-    $@ || break
+    _echoerr "_never: $*"
+    "$*" || break
     sleep 1
   done
 }
@@ -36,7 +36,7 @@ case $1 in
   list-all)
     for region in $($0 get-regions); do
       _echoerr "${region}:"
-      $0 list $region
+      $0 list "$region"
     done
   ;;
   *)
@@ -50,7 +50,7 @@ handled=yes
 case $1 in
   list)
     2>/dev/null aws rds describe-db-clusters \
-      --region $region \
+      --region "$region" \
       --filters "Name=tag:Name,Values=rdsler-*" \
       --query "DBClusters[*].DBClusterIdentifier" \
       --output "text" || true
@@ -62,22 +62,22 @@ esac
 [ "$handled" = "yes" ] && exit 0
 
 identifier="${3}"
-opts=${@:4}
+opts=${*:4}
 case $1 in
   describe)
     selector="${4:-}"
 
     2>/dev/null aws rds describe-db-clusters \
-      --region $region \
-      --db-cluster-identifier rdsler-$identifier \
+      --region "$region" \
+      --db-cluster-identifier "rdsler-$identifier" \
       --query "DBClusters[0]${selector}" \
       --output text
   ;;
   status)
     status=$(
       aws rds describe-db-clusters \
-        --region $region \
-        --db-cluster-identifier rdsler-$identifier \
+        --region "$region" \
+        --db-cluster-identifier "rdsler-$identifier" \
         --query "DBClusters[0].Status" \
         --output text
     )
@@ -90,7 +90,7 @@ case $1 in
   wait-for-status)
     desired=$4
     while true; do
-      status=$($0 status $region $identifier)
+      status=$($0 status "$region" "$identifier")
       [ "$status" = "$desired" ] && break
 
       _echoerr "current status: '$status', waiting for '$desired'"
@@ -100,15 +100,15 @@ case $1 in
     _echoerr "reached status: '$desired'"
   ;;
   get-endpoint)
-    $0 describe $region $identifier .Endpoint
+    $0 describe "$region" "$identifier" .Endpoint
   ;;
   get-port)
-    $0 describe $region $identifier .Port
+    $0 describe "$region" "$identifier" .Port
   ;;
   get-security-group)
     securityGroups=$(
       aws ec2 describe-security-groups \
-        --region $region \
+        --region "$region" \
         --filters "Name=tag:Name,Values=rdsler-$identifier" \
         --query "SecurityGroups[0].GroupId" \
         --output text
@@ -123,21 +123,22 @@ case $1 in
   ensure-security-group)
     if ! >/dev/null $0 get-security-group $region $identifier; then
       >/dev/null aws ec2 create-security-group \
-        --region $region \
-        --description rdsler-$identifier \
-        --group-name rdsler-$identifier \
+        --region "$region" \
+        --description "rdsler-$identifier" \
+        --group-name "rdsler-$identifier" \
         --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=rdsler-$identifier}]"
     fi
 
-    securityGroupId=$($0 get-security-group $region $identifier)
+    securityGroupId=$($0 get-security-group "$region" "$identifier")
 
 
     >/dev/null 2>&1 aws ec2 authorize-security-group-ingress \
-      --region $region \
-      --group-id $securityGroupId \
+      --region "$region" \
+      --group-id "$securityGroupId" \
       --query "SecurityGroupRules[0].SecurityGroupRuleId" \
       --output "text" \
-      --ip-permissions """[
+      --ip-permissions """
+[
   {
     \"IpProtocol\": \"tcp\",
     \"FromPort\": 5432,
@@ -149,31 +150,32 @@ case $1 in
       }
     ]
   }
-]""" || _echoerr "already authorized 0.0.0.0/0"
+]
+""" || _echoerr "already authorized 0.0.0.0/0"
 
-    echo $securityGroupId
+    echo "$securityGroupId"
   ;;
   delete-security-group)
-    >/dev/null $0 get-security-group $region $identifier || exit 1
+    >/dev/null $0 get-security-group "$region" "$identifier" || exit 1
 
-    aws ec2 delete-security-group --region $region --group-name rdsler-$identifier
+    aws ec2 delete-security-group --region "$region" --group-name "rdsler-$identifier"
   ;;
   ensure)
-    securityGroupId=$($0 ensure-security-group $region $identifier)
+    securityGroupId=$($0 ensure-security-group "$region" "$identifier")
 
     # engine version
-    if ! $0 status $region $identifier; then
+    if ! $0 status "$region" "$identifier"; then
       aws rds create-db-cluster \
-        --region $region \
-        --db-cluster-identifier rdsler-$identifier \
+        --region "$region" \
+        --db-cluster-identifier "rdsler-$identifier" \
         --engine aurora-postgresql \
         --engine-mode serverless \
-        --master-username $RDSLER_USER --master-user-password $RDSLER_PASSWORD \
-        --vpc-security-group-ids $securityGroupId \
+        --master-username "$RDSLER_USER" --master-user-password "$RDSLER_PASSWORD" \
+        --vpc-security-group-ids "$securityGroupId" \
         --scaling-configuration MinCapacity=2,MaxCapacity=2,AutoPause=true,SecondsUntilAutoPause=300,TimeoutAction=ForceApplyCapacityChange,SecondsBeforeTimeout=300
     fi
 
-    $0 wait-for-status $region $identifier available
+    $0 wait-for-status "$region" "$identifier" available
   ;;
   modify)
     capacity=""
@@ -202,10 +204,10 @@ case $1 in
     fi
 
     aws rds modify-db-cluster \
-      --region $region \
-      --db-cluster-identifier rdsler-$identifier \
-      $scalingConfiguration \
-      $backupConfiguration \
+      --region "$region" \
+      --db-cluster-identifier "rdsler-$identifier" \
+      "$scalingConfiguration" \
+      "$backupConfiguration" \
       --apply-immediately
 
 # [--backup-retention-period <value>]
@@ -243,17 +245,17 @@ case $1 in
 # [--generate-cli-skeleton <value>]
   ;;
   delete)
-    if >/dev/null $0 status $region $identifier; then
+    if >/dev/null $0 status "$region" "$identifier"; then
       aws rds delete-db-cluster \
-        --region $region \
+        --region "$region" \
         --skip-final-snapshot \
-        --db-cluster-identifier rdsler-$identifier
+        --db-cluster-identifier "rdsler-$identifier"
     fi
 
-    _never $0 status $region $identifier
+    _never "$0 status $region $identifier"
 
-    if $0 get-security-group $region $identifier; then
-      _forever $0 delete-security-group $region $identifier
+    if $0 get-security-group "$region" "$identifier"; then
+      _forever "$0 delete-security-group $region $identifier"
     fi
 
     echo ""
