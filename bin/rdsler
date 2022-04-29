@@ -13,7 +13,7 @@ _echoerr() {
 _forever() {
   while true; do
     _echoerr "_forever: $*"
-    "$*" && break
+    eval "$*" && break
     sleep 1
   done
 }
@@ -21,7 +21,7 @@ _forever() {
 _never() {
   while true; do
     _echoerr "_never: $*"
-    "$*" || break
+    eval "$*" || break
     sleep 1
   done
 }
@@ -31,7 +31,9 @@ export AWS_PAGER=""
 handled=yes
 case $1 in
   get-regions)
-    2>/dev/null aws rds describe-source-regions --region eu-west-1 --output=text --query='SourceRegions[*].RegionName'
+    regions=$(2>/dev/null aws rds describe-source-regions --region eu-west-1 --output=text --query='SourceRegions[*].RegionName')
+
+    echo "eu-west-1 $regions" | xargs -n1 | sort | xargs
   ;;
   list-all)
     for region in $($0 get-regions); do
@@ -49,11 +51,7 @@ region=$2
 handled=yes
 case $1 in
   list)
-    2>/dev/null aws rds describe-db-clusters \
-      --region "$region" \
-      --filters "Name=tag:Name,Values=rdsler-*" \
-      --query "DBClusters[*].DBClusterIdentifier" \
-      --output "text" || true
+    2>/dev/null aws rds describe-db-clusters --region "$region"  --output json | jq -r '.DBClusters[].DBClusterIdentifier' || true
   ;;
   *)
     handled=no
